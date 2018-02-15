@@ -3,33 +3,20 @@ var CryptoJS = require("crypto-js");
 var express = require("express");
 var bodyParser = require('body-parser');
 var WebSocket = require("ws");
+
+var Block = require("./Block");
+var MessageType = require("./MessageType");
 var spawn = require("threads").spawn;
-var miner = require("./miner")
+var miner = require("./miner");
 
 var http_port = process.env.HTTP_PORT || 3001;
 var p2p_port = process.env.P2P_PORT || 6001;
-var difficulty = "cafeba";
+var difficulty = "12345";
 var initialPeers = process.env.PEERS ? process.env.PEERS.split(',') : [];
 
-class Block {
-    constructor(index, previousHash, timestamp, data, hash, seed) {
-        this.index = index;
-        this.previousHash = previousHash.toString();
-        this.timestamp = timestamp;
-        this.data = data;
-        this.hash = hash.toString();
-        this.seed = seed;
-    }
-}
+var nodeIdentifier = require("randomstring").generate(3);
 
 var sockets = [];
-var MessageType = {
-    QUERY_LATEST: 0,
-    QUERY_ALL: 1,
-    RESPONSE_BLOCKCHAIN: 2,
-    MINE_BLOCK: 3,
-    BLOCK_MINED: 4
-};
 
 var currentMiningThread = undefined
 
@@ -120,8 +107,12 @@ var initMessageHandler = (ws) => {
                     startMining(message.data);
                 break;
             case MessageType.BLOCK_MINED:
-                if(currentMiningThread !== undefined)
+                if(currentMiningThread !== undefined) {
                     currentMiningThread.kill()
+                    currentMiningThread = undefined
+                }
+                console.log("new block mined by " + message.data);
+                break;
         }
     });
 };
@@ -236,7 +227,8 @@ var mineBlock = (data) => ({
     'data': JSON.stringify(data)
 })
 var blockMined = () => ({
-    'type': MessageType.BLOCK_MINED
+    'type': MessageType.BLOCK_MINED,
+    'data': nodeIdentifier
 })
 
 var write = (ws, message) => ws.send(JSON.stringify(message));
@@ -245,3 +237,5 @@ var broadcast = (message) => sockets.forEach(socket => write(socket, message));
 connectToPeers(initialPeers);
 initHttpServer();
 initP2PServer();
+
+console.log("I am node " + nodeIdentifier)
