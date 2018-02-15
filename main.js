@@ -3,10 +3,12 @@ var CryptoJS = require("crypto-js");
 var express = require("express");
 var bodyParser = require('body-parser');
 var WebSocket = require("ws");
+var spawn = require("threads").spawn;
+var miner = require("./miner")
 
 var http_port = process.env.HTTP_PORT || 3001;
 var p2p_port = process.env.P2P_PORT || 6001;
-var difficulty = "0000";
+var difficulty = "cafeba";
 var initialPeers = process.env.PEERS ? process.env.PEERS.split(',') : [];
 
 class Block {
@@ -24,11 +26,15 @@ var sockets = [];
 var MessageType = {
     QUERY_LATEST: 0,
     QUERY_ALL: 1,
-    RESPONSE_BLOCKCHAIN: 2
+    RESPONSE_BLOCKCHAIN: 2,
+    MINE_BLOCK: 3,
+    BLOCK_MINED: 4
 };
 
+var currentMiningThread = undefined
+
 var getGenesisBlock = () => {
-    return new Block(0, "0", 1465154705, "my genesis block!!", "816534932c2b7154836da6afc367695e6337db8a921823784c14378abed4f000", 0);
+    return new Block(0, "0", 1465154705, "genesis", "816534932c2b7154836da6afc367695e6337db8a921823784c14378abed4f000", "");
 };
 
 var blockchain = [getGenesisBlock()];
@@ -39,10 +45,12 @@ var initHttpServer = () => {
 
     app.get('/blocks', (req, res) => res.send(JSON.stringify(blockchain)));
     app.post('/mineBlock', (req, res) => {
-        var newBlock = generateNextBlock(req.body.data);
-        addBlock(newBlock);
-        broadcast(responseLatestMsg());
-        console.log('block added: ' + JSON.stringify(newBlock));
+        if(currentMiningThread !== undefined) {
+            res.send("already mining, please wait")
+            return
+        }
+        startMining(req.body.data);
+        broadcast(mineBlock(req.body.data));
         res.send();
     });
     app.get('/peers', (req, res) => {
@@ -55,6 +63,29 @@ var initHttpServer = () => {
     app.listen(http_port, () => console.log('Listening http on port: ' + http_port));
 };
 
+var startMining = (data) => {
+    var minerThread = spawn(miner);
+    currentMiningThread = minerThread
+    minerThread
+        .send({
+            nextBlock: data,
+            previousBlock: getLatestBlock(),
+            difficulty: difficulty
+        })
+        .on("message", function(response) {
+            if(blockchain[response.nextIndex] !== undefined) // do nothing if block already exists
+                return;
+
+            var newBlock = new Block(response.nextIndex, response.previousBlockHash, response.nextTimestamp,
+                response.blockData, response.nextHash, response.seed)
+            addBlock(newBlock);
+            broadcast(blockMined())
+            broadcast(responseLatestMsg());
+            console.log('block added: ' + JSON.stringify(newBlock));
+            currentMiningThread.kill()
+            currentMiningThread = undefined
+        });
+}
 
 var initP2PServer = () => {
     var server = new WebSocket.Server({port: p2p_port});
@@ -84,6 +115,13 @@ var initMessageHandler = (ws) => {
             case MessageType.RESPONSE_BLOCKCHAIN:
                 handleBlockchainResponse(message);
                 break;
+            case MessageType.MINE_BLOCK:
+                if(currentMiningThread === undefined)
+                    startMining(message.data);
+                break;
+            case MessageType.BLOCK_MINED:
+                if(currentMiningThread !== undefined)
+                    currentMiningThread.kill()
         }
     });
 };
@@ -96,22 +134,6 @@ var initErrorHandler = (ws) => {
     ws.on('close', () => closeConnection(ws));
     ws.on('error', () => closeConnection(ws));
 };
-
-
-var generateNextBlock = (blockData) => {
-    var previousBlock = getLatestBlock();
-    var nextIndex = previousBlock.index + 1;
-    var nextTimestamp = new Date().getTime() / 1000;
-    
-    var seed = 0;
-    var nextHash = calculateHash(nextIndex, previousBlock.hash, nextTimestamp, blockData, seed);
-    while(!nextHash.endsWith(difficulty)) {
-        seed++;
-        nextHash = calculateHash(nextIndex, previousBlock.hash, nextTimestamp, blockData, seed);
-    }
-    return new Block(nextIndex, previousBlock.hash, nextTimestamp, blockData, nextHash, seed);
-};
-
 
 var calculateHashForBlock = (block) => {
     return calculateHash(block.index, block.previousHash, block.timestamp, block.data, block.seed);
@@ -209,6 +231,13 @@ var responseLatestMsg = () => ({
     'type': MessageType.RESPONSE_BLOCKCHAIN,
     'data': JSON.stringify([getLatestBlock()])
 });
+var mineBlock = (data) => ({
+    'type': MessageType.MINE_BLOCK,
+    'data': JSON.stringify(data)
+})
+var blockMined = () => ({
+    'type': MessageType.BLOCK_MINED
+})
 
 var write = (ws, message) => ws.send(JSON.stringify(message));
 var broadcast = (message) => sockets.forEach(socket => write(socket, message));
